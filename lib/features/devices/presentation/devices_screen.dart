@@ -3,17 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/theme/app_colors.dart';
-import '../domain/device.dart';
+import '../../home_assistant/domain/ha_entity.dart';
+import '../../home_assistant/state/ha_states_controller.dart';
 import '../domain/room.dart';
-import '../state/devices_controller.dart';
 
-/// The "Iluminación" screen — lists all rooms with collapsible device sections
-/// and per-room drag-and-drop reordering.
-///
-/// Architecture note: the entire screen is a single [CustomScrollView] with
-/// [SliverReorderableList]s instead of a [ListView] + nested
-/// [ReorderableListView]. This prevents the gesture conflict where the outer
-/// scroll steals the vertical drag before the inner list can detect it.
+/// The "Iluminación" screen — uses tabs to switch between individual devices
+/// and scenes (Ambientes).
 class DevicesScreen extends ConsumerStatefulWidget {
   const DevicesScreen({super.key});
 
@@ -25,26 +20,26 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
   @override
   void initState() {
     super.initState();
-    // Force refresh the connection check and states when the screen is opened
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(devicesProvider.notifier).refresh();
+      ref.read(haStatesProvider.notifier).refresh();
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    // Escucha errores de toggle/conexión y muestra un SnackBar al usuario.
-    // Esto cubre: timeout, 401, host inalcanzable, etc.
-    ref.listen<DevicesState>(devicesProvider, (previous, next) {
-      if (next.connectionError != null &&
-          next.connectionError != previous?.connectionError) {
+    ref.listen<AsyncValue<HaStatesData>>(haStatesProvider, (previous, next) {
+      final prevData = previous?.valueOrNull;
+      final nextData = next.valueOrNull;
+      if (nextData != null &&
+          nextData.connectionError != null &&
+          nextData.connectionError != prevData?.connectionError) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Row(
               children: [
                 const Icon(Icons.wifi_off, color: Colors.white, size: 18),
                 const SizedBox(width: 10),
-                Expanded(child: Text(next.connectionError!)),
+                Expanded(child: Text(nextData.connectionError!)),
               ],
             ),
             backgroundColor: Colors.red.shade800,
@@ -52,184 +47,259 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
             duration: const Duration(seconds: 4),
           ),
         );
-        // Limpiar el error del estado para no re-mostrarlo.
-        ref.read(devicesProvider.notifier).clearError();
+        ref.read(haStatesProvider.notifier).clearError();
       }
     });
 
-    final state = ref.watch(devicesProvider);
+    final stateAsync = ref.watch(haStatesProvider);
 
-    if (state.isLoading) {
-      return const Scaffold(
+    return stateAsync.when(
+      loading: () => const Scaffold(
         body: Center(
           child: CircularProgressIndicator(color: AppColors.tendaGold),
+        ),
+      ),
+      error: (error, stack) => Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error_outline, size: 48, color: Colors.red),
+              const SizedBox(height: 16),
+              Text(error.toString(), style: const TextStyle(color: Colors.white)),
+            ],
+          ),
+        ),
+      ),
+      data: (state) {
+        final totalActive = state.totalActiveLights;
+
+        return DefaultTabController(
+          length: 2,
+          child: Scaffold(
+            appBar: AppBar(
+              leading: IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () {
+                  if (context.canPop()) {
+                    context.pop();
+                  } else {
+                    context.go('/');
+                  }
+                },
+              ),
+              title: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Iluminación',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 1.5,
+                        ),
+                  ),
+                  Text(
+                    '$totalActive ${totalActive == 1 ? 'luz activa' : 'luces activas'}',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Colors.grey,
+                        ),
+                  ),
+                ],
+              ),
+              actions: [
+                Center(
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: 16),
+                    child: _ActionChip(
+                      label: 'APAGAR TODO',
+                      onTap: () =>
+                          ref.read(haStatesProvider.notifier).turnOffAll(),
+                    ),
+                  ),
+                ),
+              ],
+              bottom: const TabBar(
+                indicatorColor: AppColors.tendaGold,
+                labelColor: AppColors.tendaGold,
+                unselectedLabelColor: Colors.grey,
+                tabs: [
+                  Tab(text: 'Dispositivos'),
+                  Tab(text: 'Ambientes'),
+                ],
+              ),
+            ),
+            body: TabBarView(
+              children: [
+                _buildDevicesTab(state),
+                _buildScenesTab(state),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildDevicesTab(HaStatesData state) {
+    if (state.rooms.isEmpty || state.rooms.every((r) => r.devices.isEmpty)) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.lightbulb_outline,
+              size: 64,
+              color: AppColors.tendaGold.withValues(alpha: 0.2),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'No se encontraron luces',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: AppColors.tendaGold.withValues(alpha: 0.5),
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
+          ],
         ),
       );
     }
 
-    final totalActive = state.totalActive;
+    return CustomScrollView(
+      slivers: [
+        for (final room in state.rooms) ...[
+          SliverToBoxAdapter(child: _RoomHeader(room: room)),
+          if (state.expandedRoomIds.contains(room.id))
+            SliverReorderableList(
+              itemCount: room.devices.length,
+              proxyDecorator: _proxyDecorator,
+              itemBuilder: (context, index) {
+                final device = room.devices[index];
+                return _DeviceRow(
+                  key: ValueKey(device.entityId),
+                  device: device,
+                  index: index,
+                );
+              },
+              // ignore: deprecated_member_use
+              onReorder: (oldIndex, newIndex) {
+                if (newIndex > oldIndex) newIndex -= 1;
+                ref
+                    .read(haStatesProvider.notifier)
+                    .reorderDevice(room.id, oldIndex, newIndex);
+              },
+            ),
+          SliverToBoxAdapter(
+            child: Divider(
+              color: AppColors.tendaGold.withValues(alpha: 0.2),
+              height: 1,
+              indent: 16,
+            ),
+          ),
+        ],
+        const SliverToBoxAdapter(child: SizedBox(height: 32)),
+      ],
+    );
+  }
 
-    return Scaffold(
-      body: SafeArea(
-        child: CustomScrollView(
-          slivers: [
-            // ── Header ──────────────────────────────────────────────
-            SliverToBoxAdapter(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(8, 8, 16, 0),
-                    child: Row(
-                      children: [
-                        IconButton(
-                          icon: const Icon(
-                            Icons.arrow_back,
-                            color: AppColors.tendaWhite,
-                          ),
-                          onPressed: () => context.go('/'),
-                        ),
-                        const SizedBox(width: 4),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Iluminación',
-                                style: Theme.of(context).textTheme.headlineSmall
-                                    ?.copyWith(
-                                      color: AppColors.tendaWhite,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                              ),
-                              const SizedBox(height: 2),
-                              Text(
-                                '$totalActive '
-                                '${totalActive == 1 ? 'luz activa' : 'luces activas'}',
-                                style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(color: AppColors.tendaGrayMuted),
-                              ),
-                            ],
-                          ),
-                        ),
-                        _ActionChip(
-                          label: 'APAGAR TODO',
-                          onTap: () =>
-                              ref.read(devicesProvider.notifier).turnOffAll(),
-                        ),
-                      ],
-                    ),
+  Widget _buildScenesTab(HaStatesData state) {
+    if (state.sceneEntities.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.auto_awesome,
+              size: 64,
+              color: AppColors.tendaGold.withValues(alpha: 0.2),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'No hay ambientes configurados',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: AppColors.tendaGold.withValues(alpha: 0.5),
+                    fontWeight: FontWeight.w600,
                   ),
-                  const SizedBox(height: 8),
-                  Divider(
-                    color: AppColors.tendaGold.withValues(alpha: 0.3),
-                    height: 1,
+            ),
+          ],
+        ),
+      );
+    }
+
+    return GridView.builder(
+      padding: const EdgeInsets.all(16),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 16,
+        mainAxisSpacing: 16,
+        childAspectRatio: 1.2,
+      ),
+      itemCount: state.sceneEntities.length,
+      itemBuilder: (context, index) {
+        final scene = state.sceneEntities[index];
+        final name = scene.attributes['friendly_name'] ?? scene.entityId;
+
+        return Card(
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(
+              color: AppColors.tendaGold.withValues(alpha: 0.2),
+              width: 1,
+            ),
+          ),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(16),
+            onTap: () async {
+              try {
+                await ref.read(haStatesProvider.notifier).turnOnScene(scene.entityId);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Ambiente "$name" activado'),
+                      backgroundColor: Colors.green.shade700,
+                      behavior: SnackBarBehavior.floating,
+                      duration: const Duration(seconds: 2),
+                    ),
+                  );
+                }
+              } catch (e) {
+                // El error ya lo maneja el listener global arriba
+              }
+            },
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(
+                    Icons.auto_awesome,
+                    size: 32,
+                    color: AppColors.tendaGold,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    name,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
                   ),
                 ],
               ),
             ),
-
-            // ── Empty State ─────────────────────────────────────────
-            if (state.rooms.isEmpty ||
-                state.rooms.every((r) => r.devices.isEmpty))
-              SliverFillRemaining(
-                hasScrollBody: false,
-                child: Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.lightbulb_outline,
-                        size: 64,
-                        color: AppColors.tendaGold.withValues(alpha: 0.2),
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'No se encontraron luces',
-                        style: Theme.of(context).textTheme.titleMedium
-                            ?.copyWith(
-                              color: AppColors.tendaGold.withValues(alpha: 0.5),
-                              fontWeight: FontWeight.w600,
-                            ),
-                      ),
-                      const SizedBox(height: 8),
-                      // Si hay error de conexión, lo mostramos en lugar del mensaje genérico.
-                      if (state.connectionError != null)
-                        Text(
-                          state.connectionError!,
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(color: Colors.red.shade300),
-                        )
-                      else
-                        Text(
-                          'Asegúrate de que la instancia de HA\ntenga luces o interruptores configurados.',
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(color: AppColors.tendaGrayMuted),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-
-            // ── Rooms — each room gets its own SliverReorderableList ─
-            for (final room in state.rooms) ...[
-              // Room header sliver
-              SliverToBoxAdapter(child: _RoomHeader(room: room)),
-
-              // Device list sliver — only rendered when room is expanded
-              if (state.expandedRoomIds.contains(room.id))
-                SliverReorderableList(
-                  itemCount: room.devices.length,
-                  proxyDecorator: _proxyDecorator,
-                  itemBuilder: (context, index) {
-                    final device = room.devices[index];
-                    return ReorderableDragStartListener(
-                      key: ValueKey(device.id),
-                      index: index,
-                      child: _DeviceRow(device: device),
-                    );
-                  },
-                  // ignore: deprecated_member_use
-                  onReorder: (oldIndex, newIndex) {
-                    // SliverReorderableList still uses the old API; the
-                    // standard adjustment (subtract 1 when moving down) is
-                    // needed here because onReorderItem is only on
-                    // ReorderableListView, not SliverReorderableList.
-                    if (newIndex > oldIndex) newIndex -= 1;
-                    ref
-                        .read(devicesProvider.notifier)
-                        .reorderDevice(room.id, oldIndex, newIndex);
-                  },
-                ),
-
-              // Divider after each section
-              SliverToBoxAdapter(
-                child: Divider(
-                  color: AppColors.tendaGold.withValues(alpha: 0.2),
-                  height: 1,
-                  indent: 16,
-                ),
-              ),
-            ],
-
-            // Bottom padding sliver
-            const SliverToBoxAdapter(child: SizedBox(height: 32)),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
-  /// Lifted-item decorator while dragging — adds gold shadow.
   Widget _proxyDecorator(Widget child, int index, Animation<double> animation) {
     return AnimatedBuilder(
       animation: animation,
       child: child,
       builder: (context, child) {
         return Material(
-          color: AppColors.tendaDeepBlack,
+          color: Theme.of(context).scaffoldBackgroundColor,
           elevation: 8 * animation.value,
           shadowColor: AppColors.tendaGold.withValues(alpha: 0.4),
           borderRadius: BorderRadius.circular(8),
@@ -252,11 +322,11 @@ class _RoomHeader extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final isExpanded = ref.watch(
-      devicesProvider.select((s) => s.expandedRoomIds.contains(room.id)),
+      haStatesProvider.select((s) => s.valueOrNull?.expandedRoomIds.contains(room.id) ?? false),
     );
 
     return InkWell(
-      onTap: () => ref.read(devicesProvider.notifier).toggleRoom(room.id),
+      onTap: () => ref.read(haStatesProvider.notifier).toggleRoom(room.id),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         child: Row(
@@ -265,14 +335,12 @@ class _RoomHeader extends ConsumerWidget {
               isExpanded
                   ? Icons.keyboard_arrow_down
                   : Icons.keyboard_arrow_right,
-              color: AppColors.tendaGrayMuted,
               size: 20,
             ),
             const SizedBox(width: 8),
             Text(
               room.name,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: AppColors.tendaWhite,
                 fontWeight: FontWeight.w700,
                 letterSpacing: 1.5,
                 fontSize: 13,
@@ -281,16 +349,14 @@ class _RoomHeader extends ConsumerWidget {
             const Spacer(),
             Text(
               '${room.activeCount}/${room.devices.length}',
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: AppColors.tendaGrayMuted),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey),
             ),
             if (isExpanded && room.activeCount > 0) ...[
               const SizedBox(width: 12),
               _ActionChip(
                 label: 'APAGAR',
                 onTap: () =>
-                    ref.read(devicesProvider.notifier).turnOffRoom(room.id),
+                    ref.read(haStatesProvider.notifier).turnOffRoom(room.id),
               ),
             ],
           ],
@@ -305,24 +371,27 @@ class _RoomHeader extends ConsumerWidget {
 // ═══════════════════════════════════════════════════════════════════════════
 
 class _DeviceRow extends ConsumerWidget {
-  const _DeviceRow({required this.device});
+  const _DeviceRow({super.key, required this.device, required this.index});
 
-  final Device device;
+  final HaEntity device;
+  final int index;
 
-  IconData _iconFor(DeviceType type) {
-    return switch (type) {
-      DeviceType.light => Icons.lightbulb_outline,
-      DeviceType.ambientLight => Icons.wb_twilight_outlined,
-      DeviceType.spotLight => Icons.highlight_outlined,
-      DeviceType.underglow => Icons.wb_twilight_outlined,
-    };
+  IconData _iconFor(HaEntity entity) {
+    if (entity.domain == 'light') {
+      return Icons.lightbulb_outline;
+    } else {
+      return Icons.wb_twilight_outlined;
+    }
   }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final isLoading = ref.watch(
-      devicesProvider.select((s) => s.loadingDeviceIds.contains(device.id)),
+      haStatesProvider.select((s) => s.valueOrNull?.loadingEntityIds.contains(device.entityId) ?? false),
     );
+
+    final isOn = device.state == 'on';
+    final name = device.attributes['friendly_name'] ?? device.entityId;
 
     return Material(
       color: Colors.transparent,
@@ -330,49 +399,46 @@ class _DeviceRow extends ConsumerWidget {
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
         child: Row(
           children: [
-            // Drag handle — entire row wrapped in ReorderableDragStartListener
-            // above, so this icon is purely visual.
-            MouseRegion(
-              cursor: SystemMouseCursors.grab,
-              child: Padding(
-                padding: const EdgeInsets.only(right: 12, top: 4, bottom: 4),
-                child: Icon(
-                  Icons.drag_handle,
-                  color: AppColors.tendaGold.withValues(alpha: 0.45),
-                  size: 22,
+            ReorderableDragStartListener(
+              index: index,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.grab,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 12, top: 4, bottom: 4),
+                  child: Icon(
+                    Icons.drag_handle,
+                    color: AppColors.tendaGold.withValues(alpha: 0.45),
+                    size: 22,
+                  ),
                 ),
               ),
             ),
             Icon(
-              _iconFor(device.type),
-              color: device.isOn
+              _iconFor(device),
+              color: isOn
                   ? AppColors.tendaGold
-                  : AppColors.tendaGrayMuted,
+                  : Colors.grey,
               size: 20,
             ),
             const SizedBox(width: 16),
             Expanded(
               child: Text(
-                device.name,
+                name,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: device.isOn
-                      ? AppColors.tendaWhite
-                      : AppColors.tendaGrayMuted,
+                  fontWeight: isOn ? FontWeight.w600 : FontWeight.w400,
+                  color: isOn ? null : Colors.grey,
                 ),
               ),
             ),
             Switch(
-              value: device.isOn,
+              value: isOn,
               onChanged: isLoading
                   ? null
                   : (_) => ref
-                        .read(devicesProvider.notifier)
-                        .toggleDevice(device.id),
+                        .read(haStatesProvider.notifier)
+                        .toggleLight(device.entityId, !isOn),
               activeThumbColor: AppColors.tendaGold,
               activeTrackColor: AppColors.tendaGold.withValues(alpha: 0.3),
-              inactiveThumbColor: AppColors.tendaGrayMuted,
-              inactiveTrackColor: AppColors.tendaDeepBlack,
-              trackOutlineColor: WidgetStateProperty.all(Colors.transparent),
             ),
           ],
         ),

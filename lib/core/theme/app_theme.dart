@@ -129,6 +129,118 @@ ThemeData buildTendaTheme() {
   );
 }
 
+/// Tenda-branded [ThemeData] para modo claro.
+ThemeData buildTendaLightTheme() {
+  final base = ThemeData.light();
+
+  final textTheme = GoogleFonts.rajdhaniTextTheme(
+    base.textTheme,
+  ).apply(
+    bodyColor: AppColors.tendaDeepBlack, 
+    displayColor: AppColors.tendaDeepBlack,
+  );
+
+  return base.copyWith(
+    scaffoldBackgroundColor: const Color(0xFFF5F5F5),
+
+    colorScheme: const ColorScheme.light(
+      primary: AppColors.tendaGold,
+      onPrimary: AppColors.tendaWhite,
+      secondary: AppColors.tendaGoldLight,
+      onSecondary: AppColors.tendaWhite,
+      surface: Colors.white,
+      onSurface: Color(0xFF1A1A1A), // near-black — máxima legibilidad en modo claro
+      error: AppColors.error,
+    ),
+
+    textTheme: textTheme,
+
+    appBarTheme: AppBarTheme(
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      titleTextStyle: textTheme.titleLarge?.copyWith(
+        color: AppColors.tendaDeepBlack,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 4,
+      ),
+      iconTheme: const IconThemeData(color: AppColors.tendaDeepBlack),
+    ),
+
+    switchTheme: SwitchThemeData(
+      thumbColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected)
+            ? AppColors.tendaGold
+            : Colors.grey.shade400,
+      ),
+      trackColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected)
+            ? AppColors.tendaGold.withValues(alpha: 0.4)
+            : Colors.grey.shade300,
+      ),
+      trackOutlineColor: WidgetStateProperty.all(Colors.transparent),
+    ),
+
+    iconTheme: const IconThemeData(color: AppColors.tendaDeepBlack),
+
+    dividerTheme: DividerThemeData(
+      color: AppColors.tendaDeepBlack.withValues(alpha: 0.15),
+    ),
+    dividerColor: AppColors.tendaDeepBlack.withValues(alpha: 0.10),
+
+    inputDecorationTheme: InputDecorationTheme(
+      filled: true,
+      fillColor: Colors.white,
+      labelStyle: GoogleFonts.rajdhani(
+        color: Colors.grey.shade700,
+        fontWeight: FontWeight.w500,
+        fontSize: 14,
+      ),
+      hintStyle: GoogleFonts.rajdhani(
+        color: Colors.grey.shade500,
+        fontWeight: FontWeight.w400,
+        fontSize: 14,
+      ),
+      border: UnderlineInputBorder(
+        borderSide: BorderSide(
+          color: Colors.grey.shade300,
+          width: 1,
+        ),
+      ),
+      enabledBorder: UnderlineInputBorder(
+        borderSide: BorderSide(
+          color: Colors.grey.shade300,
+          width: 1,
+        ),
+      ),
+      focusedBorder: const UnderlineInputBorder(
+        borderSide: BorderSide(color: AppColors.tendaGold, width: 2),
+      ),
+      errorBorder: const UnderlineInputBorder(
+        borderSide: BorderSide(color: AppColors.error, width: 1),
+      ),
+      focusedErrorBorder: const UnderlineInputBorder(
+        borderSide: BorderSide(color: AppColors.error, width: 2),
+      ),
+    ),
+
+    elevatedButtonTheme: ElevatedButtonThemeData(
+      style: ElevatedButton.styleFrom(
+        backgroundColor: AppColors.tendaGold,
+        foregroundColor: AppColors.tendaWhite,
+        elevation: 0,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        textStyle: GoogleFonts.rajdhani(
+          fontSize: 16,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 3,
+        ),
+      ),
+    ),
+
+    cardColor: Colors.white,
+  );
+}
+
 // Alias de compatibilidad — eliminar en la siguiente limpieza.
 // ignore: non_constant_identifier_names
 ThemeData buildAppTheme() => buildTendaTheme();

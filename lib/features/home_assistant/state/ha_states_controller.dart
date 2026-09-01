@@ -1,21 +1,23 @@
 import 'dart:async';
 
-import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../devices/domain/room.dart';
+import '../../../services/device_order/device_order_service.dart';
 import '../domain/ha_entity.dart';
 import '../services/ha_api_service.dart';
 
-/// Grouped entity lists parsed from the raw state stream.
+/// Grouped entity lists parsed from the raw state stream, along with rooms and UI state.
 class HaStatesData {
   const HaStatesData({
     required this.personEntities,
-    required this.lightEntities,
+    required this.lightEntities, // Kept for reference, though grouped in rooms
     required this.sceneEntities,
     required this.sensorEntities,
     required this.weatherEntities,
     required this.securityEntities,
+    this.rooms = const [],
+    this.expandedRoomIds = const {},
     this.loadingEntityIds = const {},
     this.connectionError,
   });
@@ -26,8 +28,14 @@ class HaStatesData {
   final List<HaEntity> sensorEntities;
   final List<HaEntity> weatherEntities;
   final List<HaEntity> securityEntities;
+  
+  final List<Room> rooms;
+  final Set<String> expandedRoomIds;
   final Set<String> loadingEntityIds;
   final String? connectionError;
+
+  /// Total active lights across all rooms.
+  int get totalActiveLights => rooms.fold<int>(0, (sum, r) => sum + r.activeCount);
 
   HaStatesData copyWith({
     List<HaEntity>? personEntities,
@@ -36,6 +44,8 @@ class HaStatesData {
     List<HaEntity>? sensorEntities,
     List<HaEntity>? weatherEntities,
     List<HaEntity>? securityEntities,
+    List<Room>? rooms,
+    Set<String>? expandedRoomIds,
     Set<String>? loadingEntityIds,
     String? connectionError,
     bool clearError = false,
@@ -47,6 +57,8 @@ class HaStatesData {
       sensorEntities: sensorEntities ?? this.sensorEntities,
       weatherEntities: weatherEntities ?? this.weatherEntities,
       securityEntities: securityEntities ?? this.securityEntities,
+      rooms: rooms ?? this.rooms,
+      expandedRoomIds: expandedRoomIds ?? this.expandedRoomIds,
       loadingEntityIds: loadingEntityIds ?? this.loadingEntityIds,
       connectionError: clearError
           ? null
@@ -60,7 +72,8 @@ final haStatesProvider =
       HaStatesController.new,
     );
 
-/// Controller to fetch, parse and hold the Home Assistant entities.
+/// Controller to fetch, parse and hold the Home Assistant entities, 
+/// as well as manage the UI state for DevicesScreen (rooms, expansion, ordering).
 class HaStatesController extends AsyncNotifier<HaStatesData> {
   @override
   FutureOr<HaStatesData> build() async {
@@ -69,22 +82,54 @@ class HaStatesController extends AsyncNotifier<HaStatesData> {
 
   Future<HaStatesData> _fetchStates() async {
     final apiService = ref.read(haApiServiceProvider);
-    final entities = await apiService.getStates();
+    
+    // Check connection first
+    try {
+      await apiService.ping();
+    } catch (e) {
+      // If we fail here, we return an empty state with an error
+      return const HaStatesData(
+        personEntities: [],
+        lightEntities: [],
+        sceneEntities: [],
+        sensorEntities: [],
+        weatherEntities: [],
+        securityEntities: [],
+        rooms: [],
+        connectionError: 'Sin conexión con Home Assistant. Verifica tu red o URL.',
+      );
+    }
+
+    // Fetch states and areas in parallel
+    final results = await Future.wait([
+      apiService.getStates(),
+      apiService.getEntityAreas(),
+    ]);
+
+    final entities = results[0] as List<HaEntity>;
+    final areaMap = results[1] as Map<String, String>;
+    final orderMap = await ref.read(deviceOrderServiceProvider).getOrder();
 
     final persons = <HaEntity>[];
-    var lights = <HaEntity>[];
+    final lightsAndSwitches = <HaEntity>[];
     final scenes = <HaEntity>[];
     final sensors = <HaEntity>[];
     final weather = <HaEntity>[];
     final security = <HaEntity>[];
 
-    for (final e in entities) {
+    for (var e in entities) {
+      // Inject area from the Jinja template mapping
+      if (areaMap.containsKey(e.entityId)) {
+        e = e.copyWith(area: areaMap[e.entityId]!);
+      }
+
       switch (e.domain) {
         case 'person':
           persons.add(e);
           break;
         case 'light':
-          lights.add(e);
+        case 'switch': // Include switches in the lights group
+          lightsAndSwitches.add(e);
           break;
         case 'scene':
           scenes.add(e);
@@ -116,41 +161,52 @@ class HaStatesController extends AsyncNotifier<HaStatesData> {
       }
     }
 
-    // --- Persistencia: Cargar mapeo de áreas y orden ---
-    final prefs = await SharedPreferences.getInstance();
-
-    // 1. Cargar áreas asignadas
-    final areaMapStr = prefs.getString('lights_area');
-    final Map<String, String> areaMap = areaMapStr != null
-        ? Map<String, String>.from(jsonDecode(areaMapStr))
-        : {};
-
-    // Asignar área a cada luz
-    lights = lights
-        .map((l) => l.copyWith(area: areaMap[l.entityId] ?? 'TODAS'))
-        .toList();
-
-    // 2. Cargar orden personalizado
-    final orderList = prefs.getStringList('lights_order') ?? [];
-
-    if (orderList.isNotEmpty) {
-      lights.sort((a, b) {
-        var indexA = orderList.indexOf(a.entityId);
-        var indexB = orderList.indexOf(b.entityId);
-        // Si no están en la lista guardada, los mandamos al final
-        if (indexA == -1) indexA = 999999;
-        if (indexB == -1) indexB = 999999;
-        return indexA.compareTo(indexB);
-      });
+    // Group lights/switches into Rooms (Areas)
+    final Map<String, List<HaEntity>> groupedByArea = {};
+    for (final device in lightsAndSwitches) {
+      final areaName = device.area;
+      groupedByArea.putIfAbsent(areaName, () => []).add(device);
     }
+
+    var rooms = groupedByArea.entries.map((entry) {
+      final areaName = entry.key;
+      var devices = entry.value;
+
+      // Sort by orderMap
+      devices.sort((a, b) {
+        final ia = orderMap[a.entityId] ?? double.maxFinite.toInt();
+        final ib = orderMap[b.entityId] ?? double.maxFinite.toInt();
+        return ia.compareTo(ib);
+      });
+
+      // Assign sequential sortIndex based on final order
+      devices = devices.asMap().entries.map((e) {
+        // We reuse the 'order' field in HaEntity or just know they are sorted.
+        // Actually, we need to pass sortIndex to the UI? Reorderable list just uses index.
+        return e.value;
+      }).toList();
+
+      return Room(id: areaName, name: areaName, devices: devices);
+    }).toList();
+
+    // Sort rooms alphabetically
+    rooms.sort((a, b) => a.name.compareTo(b.name));
+
+    // Expand rooms that have active devices by default
+    final expanded = rooms
+        .where((r) => r.activeCount > 0)
+        .map((r) => r.id)
+        .toSet();
 
     return HaStatesData(
       personEntities: persons,
-      lightEntities: lights,
+      lightEntities: lightsAndSwitches,
       sceneEntities: scenes,
       sensorEntities: sensors,
       weatherEntities: weather,
       securityEntities: security,
+      rooms: rooms,
+      expandedRoomIds: expanded,
       loadingEntityIds: const {},
       connectionError: null,
     );
@@ -162,48 +218,53 @@ class HaStatesController extends AsyncNotifier<HaStatesData> {
     state = await AsyncValue.guard(() => _fetchStates());
   }
 
-  /// Actualiza el orden de las luces (Drag & Drop) y lo guarda en SharedPreferences.
-  Future<void> updateLightsOrder(int oldIndex, int newIndex) async {
+  // ── Reorder ────────────────────────────────────────────────────────
+
+  /// Reorder devices within [roomId] (area) using ReorderableListView indices.
+  Future<void> reorderDevice(String roomId, int oldIndex, int newIndex) async {
+    if (oldIndex == newIndex) return;
+
     final currentData = state.valueOrNull;
     if (currentData == null) return;
 
-    final lights = List<HaEntity>.from(currentData.lightEntities);
-    final item = lights.removeAt(oldIndex);
-    lights.insert(newIndex, item);
-
-    // Actualizamos el estado optimísticamente
-    state = AsyncValue.data(currentData.copyWith(lightEntities: lights));
-
-    // Persistimos en SharedPreferences
-    final orderList = lights.map((l) => l.entityId).toList();
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('lights_order', orderList);
-  }
-
-  /// Asigna una luz a una pestaña/área específica y guarda en SharedPreferences.
-  Future<void> updateLightArea(String entityId, String newArea) async {
-    final currentData = state.valueOrNull;
-    if (currentData == null) return;
-
-    final lights = currentData.lightEntities.map((l) {
-      if (l.entityId == entityId) {
-        return l.copyWith(area: newArea);
-      }
-      return l;
+    final updatedRooms = currentData.rooms.map((room) {
+      if (room.id != roomId) return room;
+      final devices = [...room.devices];
+      final item = devices.removeAt(oldIndex);
+      devices.insert(newIndex, item);
+      return room.copyWith(devices: devices);
     }).toList();
 
-    // Actualizamos el estado
-    state = AsyncValue.data(currentData.copyWith(lightEntities: lights));
+    // Optimistic update
+    state = AsyncValue.data(currentData.copyWith(rooms: updatedRooms));
 
-    // Leemos, actualizamos y persistimos el mapa de áreas
-    final prefs = await SharedPreferences.getInstance();
-    final areaMapStr = prefs.getString('lights_area');
-    final areaMap = areaMapStr != null
-        ? Map<String, String>.from(jsonDecode(areaMapStr))
-        : <String, String>{};
-    areaMap[entityId] = newArea;
-    await prefs.setString('lights_area', jsonEncode(areaMap));
+    // Merge and persist
+    final fullMap = <String, int>{};
+    for (final room in updatedRooms) {
+      for (var i = 0; i < room.devices.length; i++) {
+        fullMap[room.devices[i].entityId] = i;
+      }
+    }
+    
+    await ref.read(deviceOrderServiceProvider).saveOrder(fullMap);
   }
+
+  // ── Room collapse ──────────────────────────────────────────────────
+
+  void toggleRoom(String roomId) {
+    final currentData = state.valueOrNull;
+    if (currentData == null) return;
+
+    final updated = Set<String>.from(currentData.expandedRoomIds);
+    if (updated.contains(roomId)) {
+      updated.remove(roomId);
+    } else {
+      updated.add(roomId);
+    }
+    state = AsyncValue.data(currentData.copyWith(expandedRoomIds: updated));
+  }
+
+  // ── Toggle / Turn off ──────────────────────────────────────────────
 
   void clearError() {
     final currentData = state.valueOrNull;
@@ -211,24 +272,24 @@ class HaStatesController extends AsyncNotifier<HaStatesData> {
     state = AsyncValue.data(currentData.copyWith(clearError: true));
   }
 
-  /// Toggle light with optimistic UI and HA real state validation.
   Future<void> toggleLight(String entityId, bool turnOn) async {
     final currentData = state.valueOrNull;
     if (currentData == null) return;
     if (currentData.loadingEntityIds.contains(entityId)) return;
 
     // 1. Optimistic UI + mark as loading
-    final originalLights = List<HaEntity>.from(currentData.lightEntities);
-    final updatedLights = originalLights.map((l) {
-      if (l.entityId == entityId) {
-        return l.copyWith(state: turnOn ? 'on' : 'off');
-      }
-      return l;
+    final originalRooms = currentData.rooms;
+    final updatedRooms = originalRooms.map((room) {
+      final devices = room.devices.map((d) {
+        if (d.entityId == entityId) return d.copyWith(state: turnOn ? 'on' : 'off');
+        return d;
+      }).toList();
+      return room.copyWith(devices: devices);
     }).toList();
 
     state = AsyncValue.data(
       currentData.copyWith(
-        lightEntities: updatedLights,
+        rooms: updatedRooms,
         loadingEntityIds: {...currentData.loadingEntityIds, entityId},
         clearError: true,
       ),
@@ -247,45 +308,120 @@ class HaStatesController extends AsyncNotifier<HaStatesData> {
       final latestData = state.valueOrNull;
       if (latestData == null) return;
 
-      var finalLights = latestData.lightEntities;
+      var finalRooms = latestData.rooms;
 
       // Parse changed_states to confirm real HA state
       if (changedStates.isNotEmpty) {
         for (final s in changedStates) {
           if (s is Map<String, dynamic> && s['entity_id'] == entityId) {
             final realState = s['state'] as String;
-            finalLights = finalLights.map((l) {
-              if (l.entityId == entityId) return l.copyWith(state: realState);
-              return l;
+            finalRooms = finalRooms.map((room) {
+              final devices = room.devices.map((d) {
+                if (d.entityId == entityId) return d.copyWith(state: realState);
+                return d;
+              }).toList();
+              return room.copyWith(devices: devices);
             }).toList();
             break;
           }
         }
       }
 
-      final newLoading = Set<String>.from(latestData.loadingEntityIds)
-        ..remove(entityId);
+      final newLoading = Set<String>.from(latestData.loadingEntityIds)..remove(entityId);
       state = AsyncValue.data(
-        latestData.copyWith(
-          lightEntities: finalLights,
-          loadingEntityIds: newLoading,
-        ),
+        latestData.copyWith(rooms: finalRooms, loadingEntityIds: newLoading),
       );
     } catch (e) {
       final latestData = state.valueOrNull;
       if (latestData == null) return;
 
-      // Rollback
-      final newLoading = Set<String>.from(latestData.loadingEntityIds)
-        ..remove(entityId);
+      final newLoading = Set<String>.from(latestData.loadingEntityIds)..remove(entityId);
       state = AsyncValue.data(
         latestData.copyWith(
-          lightEntities: originalLights, // Revert to original
+          rooms: originalRooms,
           loadingEntityIds: newLoading,
-          connectionError:
-              'No se pudo conectar con Home Assistant. Verifica tu red.',
+          connectionError: 'No se pudo conectar con Home Assistant. Verifica tu red.',
         ),
       );
+    }
+  }
+
+  void turnOffAll() {
+    final currentData = state.valueOrNull;
+    if (currentData == null) return;
+
+    final originalRooms = currentData.rooms;
+    final updatedRooms = originalRooms.map((room) {
+      final updated = room.devices.map((d) => d.copyWith(state: 'off')).toList();
+      return room.copyWith(devices: updated);
+    }).toList();
+    
+    state = AsyncValue.data(currentData.copyWith(rooms: updatedRooms));
+
+    final apiService = ref.read(haApiServiceProvider);
+    
+    Future.wait([
+      apiService.callService('light', 'turn_off', {'entity_id': 'all'}),
+      apiService.callService('switch', 'turn_off', {'entity_id': 'all'}),
+    ]).catchError((_) {
+      final latestData = state.valueOrNull;
+      if (latestData != null) {
+        state = AsyncValue.data(latestData.copyWith(rooms: originalRooms));
+      }
+      return <List<dynamic>>[];
+    });
+  }
+
+  void turnOffRoom(String roomId) {
+    final currentData = state.valueOrNull;
+    if (currentData == null) return;
+
+    final originalRooms = currentData.rooms;
+    final updatedRooms = originalRooms.map((room) {
+      if (room.id != roomId) return room;
+      final updated = room.devices.map((d) => d.copyWith(state: 'off')).toList();
+      return room.copyWith(devices: updated);
+    }).toList();
+    
+    state = AsyncValue.data(currentData.copyWith(rooms: updatedRooms));
+
+    final devicesToTurnOff = originalRooms
+        .firstWhere((r) => r.id == roomId)
+        .devices
+        .where((d) => d.state == 'on');
+        
+    final apiService = ref.read(haApiServiceProvider);
+
+    Future.wait(
+      devicesToTurnOff.map((d) {
+        final domain = d.entityId.split('.').first;
+        return apiService.callService(domain, 'turn_off', {'entity_id': d.entityId});
+      }),
+    ).catchError((_) {
+      final latestData = state.valueOrNull;
+      if (latestData != null) {
+        state = AsyncValue.data(latestData.copyWith(rooms: originalRooms));
+      }
+      return <List<dynamic>>[];
+    });
+  }
+
+  // ── Scenes ─────────────────────────────────────────────────────────
+
+  Future<void> turnOnScene(String entityId) async {
+    final apiService = ref.read(haApiServiceProvider);
+    try {
+      await apiService.callService('scene', 'turn_on', {'entity_id': entityId});
+    } catch (e) {
+      final latestData = state.valueOrNull;
+      if (latestData != null) {
+        state = AsyncValue.data(
+          latestData.copyWith(
+            connectionError: 'Error al activar escena: $e',
+          ),
+        );
+      }
+      rethrow;
     }
   }
 }

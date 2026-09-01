@@ -1,17 +1,17 @@
-import 'device.dart';
+import '../../home_assistant/domain/ha_entity.dart';
 
-/// A room (or zone) containing one or more [Device]s.
+/// A room (or zone) containing one or more [HaEntity]s.
 class Room {
   const Room({required this.id, required this.name, required this.devices});
 
   final String id;
   final String name;
-  final List<Device> devices;
+  final List<HaEntity> devices;
 
   /// Number of devices currently turned on.
-  int get activeCount => devices.where((d) => d.isOn).length;
+  int get activeCount => devices.where((d) => d.state == 'on').length;
 
-  Room copyWith({List<Device>? devices}) {
+  Room copyWith({List<HaEntity>? devices}) {
     return Room(id: id, name: name, devices: devices ?? this.devices);
   }
 
@@ -27,7 +27,7 @@ class Room {
   @override
   int get hashCode => Object.hash(id, name, Object.hashAll(devices));
 
-  static bool _listEquals(List<Device> a, List<Device> b) {
+  static bool _listEquals(List<HaEntity> a, List<HaEntity> b) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {
       if (a[i] != b[i]) return false;

@@ -3,14 +3,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../core/theme/app_colors.dart';
+import '../../../core/theme/theme_provider.dart';
 import '../../../core/utils/greeting.dart';
-import '../../../services/home_connector/home_connector.dart';
-import '../../devices/state/devices_controller.dart';
+import '../../auth/services/ha_connection_service.dart';
 import '../../home_assistant/domain/ha_entity.dart';
 import '../../home_assistant/state/ha_states_controller.dart';
+import '../../ai_history/presentation/history_panel.dart';
+import '../domain/jarvis_state.dart';
 import '../state/jarvis_core_controller.dart';
 import 'jarvis_core_widget.dart';
-import 'lights_screen.dart';
 import 'security_screen.dart';
 import 'weather_screen.dart';
 
@@ -30,6 +31,7 @@ class HomeScreen extends ConsumerWidget {
     final coreState = ref.watch(jarvisCoreProvider);
     final currentState = coreState.animationState;
     final haStatesAsync = ref.watch(haStatesProvider);
+    final cs = Theme.of(context).colorScheme;
 
     return Scaffold(
       body: SafeArea(
@@ -43,16 +45,12 @@ class HomeScreen extends ConsumerWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(
-                    Icons.error_outline,
-                    color: AppColors.error,
-                    size: 48,
-                  ),
+                  Icon(Icons.error_outline, color: cs.error, size: 48),
                   const SizedBox(height: 16),
                   Text(
                     'Error de conexión:\n$err',
                     textAlign: TextAlign.center,
-                    style: const TextStyle(color: AppColors.textSecondary),
+                    style: TextStyle(color: cs.onSurface.withValues(alpha: 0.7)),
                   ),
                   const SizedBox(height: 24),
                   OutlinedButton(
@@ -70,19 +68,19 @@ class HomeScreen extends ConsumerWidget {
           ),
           data: (haData) => Column(
             children: [
-              // ── Status bar & User header ─────────────────────────────
+              // ── Status bar & User header ──────────────────────────────
               _StatusBar(personEntities: haData.personEntities),
 
               const Spacer(flex: 2),
 
-              // ── State label ──────────────────────────────────────────
+              // ── State label ───────────────────────────────────────────
               AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
                 child: Text(
                   _stateLabels[currentState]!,
                   key: ValueKey(currentState),
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: AppColors.tendaGrayMuted,
+                    color: cs.onSurface.withValues(alpha: 0.65),
                     letterSpacing: 4,
                     fontSize: 13,
                   ),
@@ -91,7 +89,7 @@ class HomeScreen extends ConsumerWidget {
 
               const SizedBox(height: 8),
 
-              // ── Divider ──────────────────────────────────────────────
+              // ── Divider ───────────────────────────────────────────────
               Container(
                 width: 200,
                 height: 1,
@@ -100,12 +98,12 @@ class HomeScreen extends ConsumerWidget {
 
               const SizedBox(height: 32),
 
-              // ── Core orb ─────────────────────────────────────────────
+              // ── Core orb ──────────────────────────────────────────────
               const JarvisCoreWidget(),
 
               const SizedBox(height: 40),
 
-              // ── Status message (subtitle from controller) ───────────
+              // ── Status message (subtitle from controller) ─────────────
               AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
                 child: Container(
@@ -118,8 +116,8 @@ class HomeScreen extends ConsumerWidget {
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
                       color: coreState.subtitle.startsWith('Error')
-                          ? AppColors.error.withValues(alpha: 0.5)
-                          : AppColors.divider,
+                          ? cs.error.withValues(alpha: 0.5)
+                          : cs.onSurface.withValues(alpha: 0.12),
                       width: 1,
                     ),
                   ),
@@ -127,8 +125,8 @@ class HomeScreen extends ConsumerWidget {
                     coreState.subtitle,
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       color: coreState.subtitle.startsWith('Error')
-                          ? AppColors.error
-                          : AppColors.textSecondary,
+                          ? cs.error
+                          : cs.onSurface.withValues(alpha: 0.8),
                     ),
                     textAlign: TextAlign.center,
                     maxLines: 3,
@@ -139,35 +137,49 @@ class HomeScreen extends ConsumerWidget {
 
               const SizedBox(height: 12),
 
-              // ── History hint ─────────────────────────────────────────
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    width: 40,
-                    height: 1,
-                    color: AppColors.tendaGold.withValues(alpha: 0.3),
+              // ── History hint — swipe up to open panel ─────────────────
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onVerticalDragEnd: (details) {
+                  // Swipe UP (negative velocity = upward movement)
+                  if (details.primaryVelocity != null &&
+                      details.primaryVelocity! < -200) {
+                    showHistoryPanel(context);
+                  }
+                },
+                onTap: () => showHistoryPanel(context),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 1,
+                        color: AppColors.tendaGold.withValues(alpha: 0.3),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Toca para historial',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: cs.onSurface.withValues(alpha: 0.55),
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        width: 40,
+                        height: 1,
+                        color: AppColors.tendaGold.withValues(alpha: 0.3),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  Text(
-                    'desliza para historial',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: AppColors.tendaGrayMuted,
-                      fontSize: 12,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Container(
-                    width: 40,
-                    height: 1,
-                    color: AppColors.tendaGold.withValues(alpha: 0.3),
-                  ),
-                ],
+                ),
               ),
 
               const Spacer(flex: 3),
 
-              // ── Bottom dock ──────────────────────────────────────────
+              // ── Bottom dock ───────────────────────────────────────────
               _BottomDock(haData: haData),
 
               const SizedBox(height: 16),
@@ -183,13 +195,14 @@ class HomeScreen extends ConsumerWidget {
 // Status bar
 // ═══════════════════════════════════════════════════════════════════════════
 
-class _StatusBar extends StatelessWidget {
+class _StatusBar extends ConsumerWidget {
   const _StatusBar({required this.personEntities});
 
   final List<HaEntity> personEntities;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final cs = Theme.of(context).colorScheme;
     final person = personEntities.isNotEmpty ? personEntities.first : null;
     final friendlyName = person?.friendlyName ?? 'Usuario';
     final stateStr = person?.state == 'home'
@@ -209,7 +222,7 @@ class _StatusBar extends StatelessWidget {
               Text(
                 '${greetingForNow()}, $friendlyName',
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                  color: AppColors.tendaWhite,
+                  color: cs.onSurface,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -223,7 +236,7 @@ class _StatusBar extends StatelessWidget {
                     decoration: BoxDecoration(
                       color: stateStr == 'En Casa'
                           ? AppColors.tendaGold
-                          : AppColors.tendaGrayMuted,
+                          : cs.onSurface.withValues(alpha: 0.3),
                       shape: BoxShape.circle,
                     ),
                   ),
@@ -231,7 +244,7 @@ class _StatusBar extends StatelessWidget {
                   Text(
                     stateStr.isNotEmpty ? stateStr : 'Desconectado',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: AppColors.tendaGrayMuted,
+                      color: cs.onSurface.withValues(alpha: 0.5),
                       fontSize: 12,
                     ),
                   ),
@@ -264,7 +277,7 @@ class _StatusBar extends StatelessWidget {
 
           // Settings icon
           InkWell(
-            onTap: () => context.push('/login'),
+            onTap: () => _showSettings(context, ref),
             borderRadius: BorderRadius.circular(20),
             child: Container(
               padding: const EdgeInsets.all(8),
@@ -274,14 +287,92 @@ class _StatusBar extends StatelessWidget {
                   color: AppColors.tendaGold.withValues(alpha: 0.4),
                 ),
               ),
-              child: const Icon(
+              child: Icon(
                 Icons.settings_outlined,
                 size: 18,
-                color: AppColors.tendaWhite,
+                color: cs.onSurface,
               ),
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  void _showSettings(BuildContext context, WidgetRef ref) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return const _SettingsBottomSheet();
+      },
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Settings BottomSheet
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _SettingsBottomSheet extends ConsumerWidget {
+  const _SettingsBottomSheet();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final themeMode = ref.watch(themeProvider);
+    final isDark = themeMode == ThemeMode.dark;
+    final cs = Theme.of(context).colorScheme;
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Ajustes',
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            SwitchListTile(
+              title: Text('Modo Oscuro', style: TextStyle(color: cs.onSurface)),
+              subtitle: Text(
+                'Cambiar la apariencia de la aplicación',
+                style: TextStyle(color: cs.onSurface.withValues(alpha: 0.6)),
+              ),
+              value: isDark,
+              activeThumbColor: AppColors.tendaGold,
+              activeTrackColor: AppColors.tendaGold.withValues(alpha: 0.4),
+              onChanged: (value) {
+                ref.read(themeProvider.notifier).toggleTheme();
+              },
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: () async {
+                Navigator.pop(context);
+                await ref.read(haConnectionServiceProvider).logout();
+                if (context.mounted) {
+                  context.go('/login');
+                }
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red.shade900,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+              ),
+              icon: const Icon(Icons.logout, color: Colors.white),
+              label: const Text('CERRAR SESIÓN'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -306,10 +397,7 @@ class _BottomDock extends ConsumerWidget {
           _DockItem(
             icon: Icons.lightbulb_outline,
             label: 'LUCES',
-            onTap: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const LightsScreen()),
-            ),
+            onTap: () => context.push('/devices'),
           ),
           _DockItem(
             icon: Icons.thermostat_outlined,
@@ -331,11 +419,11 @@ class _BottomDock extends ConsumerWidget {
             icon: Icons.power_settings_new,
             label: 'APAGAR TODO',
             onTap: () {
-              ref.read(devicesProvider.notifier).turnOffAll();
+              ref.read(haStatesProvider.notifier).turnOffAll();
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
                   content: const Text('Apagando todos los dispositivos…'),
-                  backgroundColor: AppColors.surface,
+                  backgroundColor: Theme.of(context).colorScheme.surface,
                   behavior: SnackBarBehavior.floating,
                   duration: const Duration(seconds: 2),
                 ),
@@ -365,6 +453,7 @@ class _DockItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return GestureDetector(
       onTap: onTap,
       child: SizedBox(
@@ -387,7 +476,7 @@ class _DockItem extends StatelessWidget {
             Text(
               label,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: AppColors.tendaGrayMuted,
+                color: cs.onSurface.withValues(alpha: 0.55),
                 fontSize: 9,
                 letterSpacing: 1,
               ),

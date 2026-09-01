@@ -6,8 +6,8 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../services/agent/n8n_agent_service.dart';
-import '../../../services/home_connector/ha_home_connector.dart';
-import '../../../services/home_connector/home_connector.dart';
+import '../../ai_history/services/ai_history_service.dart';
+import '../domain/jarvis_state.dart';
 
 /// The full state exposed by [JarvisCoreController].
 ///
@@ -33,9 +33,9 @@ class JarvisCoreState {
 /// Riverpod provider for the Jarvis core state.
 final jarvisCoreProvider =
     StateNotifierProvider<JarvisCoreController, JarvisCoreState>((ref) {
-      final connector = ref.watch(homeConnectorProvider);
       final agent = ref.watch(agentServiceProvider);
-      return JarvisCoreController(connector, agent);
+      final history = ref.watch(aiHistoryServiceProvider);
+      return JarvisCoreController(agent, history);
     });
 
 /// Controls the Jarvis core animation state and orchestrates the n8n agent.
@@ -50,16 +50,11 @@ final jarvisCoreProvider =
 ///
 /// On any error the state reverts to idle and the subtitle shows the reason.
 class JarvisCoreController extends StateNotifier<JarvisCoreState> {
-  JarvisCoreController(this._connector, this._agent)
-    : super(const JarvisCoreState()) {
-    _subscription = _connector.coreStateChanges.listen((incoming) {
-      if (mounted) state = state.copyWith(animationState: incoming);
-    });
-  }
+  JarvisCoreController(this._agent, this._history)
+      : super(const JarvisCoreState());
 
-  final HomeConnector _connector;
   final JarvisAgentService _agent;
-  late final StreamSubscription<JarvisState> _subscription;
+  final AiHistoryService _history;
 
   // ── Audio player ───────────────────────────────────────────────────
   final AudioPlayer _audioPlayer = AudioPlayer();
@@ -112,8 +107,15 @@ class JarvisCoreController extends StateNotifier<JarvisCoreState> {
     );
 
     try {
+      // Persist user message before sending
+      await _history.addMessage(text: text, isUser: true);
+
       final reply = await _agent.sendText(text);
       if (!mounted) return;
+
+      // Persist Jarvis reply
+      await _history.addMessage(text: reply.text, isUser: false);
+
       await _respondAndPlay(reply);
     } catch (e) {
       if (!mounted) return;
@@ -135,6 +137,10 @@ class JarvisCoreController extends StateNotifier<JarvisCoreState> {
     try {
       final reply = await _agent.sendAudio(audioFile);
       if (!mounted) return;
+
+      // Persist Jarvis reply (audio commands don't have a known transcription)
+      await _history.addMessage(text: reply.text, isUser: false);
+
       await _respondAndPlay(reply);
     } catch (e) {
       if (!mounted) return;
@@ -200,7 +206,6 @@ class JarvisCoreController extends StateNotifier<JarvisCoreState> {
   @override
   void dispose() {
     _audioPlayer.dispose();
-    _subscription.cancel();
     super.dispose();
   }
 

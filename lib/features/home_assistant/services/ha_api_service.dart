@@ -117,4 +117,60 @@ class HaApiService {
     }
     return [];
   }
+
+  /// Fetches the mapping of light entity IDs to their area names from Home Assistant.
+  /// 
+  /// Home Assistant's REST API doesn't expose areas directly in `/api/states`, 
+  /// so we evaluate a Jinja2 template to extract this information natively.
+  Future<Map<String, String>> getEntityAreas() async {
+    final credentials = await _authService.getCredentials();
+    if (credentials == null) {
+      throw Exception('No valid credentials found for Home Assistant.');
+    }
+
+    final url = Uri.parse('${credentials.url}/api/template');
+    
+    // Jinja2 template to iterate through lights (and switches) and get their areas
+    // HA Jinja requires `namespace` to modify variables inside a loop.
+    const templateStr = '''
+{% set ns = namespace(areas={}) %}
+{% for state in states.light %}
+  {% set a_id = area_id(state.entity_id) %}
+  {% if a_id %}
+    {% set ns.areas = dict(ns.areas, **{state.entity_id: area_name(a_id)}) %}
+  {% endif %}
+{% endfor %}
+{% for state in states.switch %}
+  {% set a_id = area_id(state.entity_id) %}
+  {% if a_id %}
+    {% set ns.areas = dict(ns.areas, **{state.entity_id: area_name(a_id)}) %}
+  {% endif %}
+{% endfor %}
+{{ ns.areas | tojson }}
+''';
+
+    final response = await http
+        .post(
+          url,
+          headers: {
+            'Authorization': 'Bearer ${credentials.token}',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({'template': templateStr}),
+        )
+        .timeout(const Duration(seconds: 15));
+
+    if (response.statusCode != 200) {
+      throw Exception(
+        'Error fetching areas via template. HTTP ${response.statusCode}: ${response.body}',
+      );
+    }
+
+    try {
+      final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+      return decoded.map((k, v) => MapEntry(k, v.toString()));
+    } catch (e) {
+      throw Exception('Error parsing areas JSON: $e');
+    }
+  }
 }

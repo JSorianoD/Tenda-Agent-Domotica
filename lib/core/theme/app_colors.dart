@@ -11,7 +11,7 @@ import 'package:flutter/material.dart';
 abstract final class AppColors {
   // ── Tenda Brand (source of truth) ────────────────────────────────────────
   /// Fondo principal — negro profundo de la marca.
-  static const tendaDeepBlack = Color(0xFF0A0A0A);
+  static const tendaDeepBlack = Color(0xFF0A0E0F);
 
   /// Acento primario — dorado Tenda, CTA, foco, íconos activos.
   static const tendaGold = Color(0xFFC9A227);
